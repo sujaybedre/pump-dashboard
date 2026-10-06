@@ -11,6 +11,19 @@ const PAGE_SIZE = 1000;
 const MAX_ROWS = 8000;
 const FOOT_COLOR = "#2f6fed";
 const WATER_COLOR = "#0f8f78";
+const PEAK_COLOR = "#b45309";
+
+// Compared with this pump's own median current, not a fixed amp rating.
+const DRY_RATIO = 0.7;
+const JAM_RATIO = 1.6;
+const JAM_SPIKE_RATIO = 1.25;
+const OVERLOAD_RATIO = 1.25;
+const OVERLOAD_STREAK = 3;
+const DRIFT_RATIO = 1.1;
+const MIN_BASELINE_RUNS = 8;
+const MIN_DRIFT_WEEKS = 4;
+const USAGE_CHART_IDS = ["visitsDayChart", "visitsHourChart", "bathroomChart", "waterChart", "relationChart"];
+const HEALTH_CHART_IDS = ["currentChart", "driftChart"];
 
 const fromInput = document.getElementById("fromDate");
 const toInput = document.getElementById("toDate");
@@ -26,6 +39,7 @@ const state = {
   bathroomLatest: [],
   pumpLatest: [],
   waterGrain: "day",
+  view: "usage",
   truncated: false,
   charts: {}
 };
@@ -850,8 +864,442 @@ function renderPumpTable() {
     .join("");
 }
 
+function reading(value) {
+  if (value == null || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function formatAmps(value) {
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  const number = Number(value);
+  return `${number.toFixed(number >= 10 ? 1 : 2)} A`;
+}
+
+function destroyCharts(ids) {
+  ids.forEach((id) => {
+    if (state.charts[id]) {
+      state.charts[id].destroy();
+      delete state.charts[id];
+    }
+  });
+}
+
+function establishBaseline(runs) {
+  const averages = runs.map((run) => reading(run.avg_current)).filter((value) => value != null);
+  if (!averages.length) return { amps: null, reliable: false, samples: 0 };
+
+  const mid = median(averages);
+  const core = averages.filter((value) => value >= mid * 0.55 && value <= mid * 1.45);
+  return {
+    amps: core.length >= 5 ? median(core) : mid,
+    reliable: averages.length >= MIN_BASELINE_RUNS && core.length >= 5 && mid > 0,
+    samples: averages.length
+  };
+}
+
+function bearingDrift(runs) {
+  const byWeek = new Map();
+  runs.forEach((run) => {
+    const avg = reading(run.avg_current);
+    if (avg == null || !run.started_at) return;
+    const week = weekStartKey(istParts(run.started_at).key);
+    const values = byWeek.get(week) || [];
+    values.push(avg);
+    byWeek.set(week, values);
+  });
+
+  const weeks = [...byWeek.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([week, values]) => ({
+      week,
+      label: formatBucket(week, "week"),
+      median: median(values),
+      count: values.length
+    }));
+
+  if (weeks.length < MIN_DRIFT_WEEKS) {
+    return { flagged: false, weeks, older: null, newer: null };
+  }
+
+  const mid = Math.floor(weeks.length / 2);
+  const older = median(weeks.slice(0, mid).map((week) => week.median));
+  const newer = median(weeks.slice(mid).map((week) => week.median));
+  return {
+    flagged: older > 0 && newer >= older * DRIFT_RATIO,
+    weeks,
+    older,
+    newer
+  };
+}
+
+function analyzePumpHealth(runs) {
+  const baseline = establishBaseline(runs);
+  const base = baseline.amps;
+  const ordered = [...runs].sort((a, b) => new Date(a.started_at) - new Date(b.started_at));
+  const classified = ordered.map((run) => {
+    const avg = reading(run.avg_current);
+    const max = reading(run.max_current);
+    if (avg == null && max == null) {
+      return { run, avg, max, findings: [], kind: "no-current" };
+    }
+    if (!baseline.reliable || base == null) {
+      return { run, avg, max, findings: [], kind: "learning" };
+    }
+
+    const dry = avg != null && avg < base * DRY_RATIO;
+    const jam = max != null && max > base * JAM_RATIO && (avg == null || max >= avg * JAM_SPIKE_RATIO);
+    const elevated = avg != null && avg > base * OVERLOAD_RATIO && !jam && !dry;
+    return { run, avg, max, dry, jam, elevated, findings: [], kind: "normal" };
+  });
+
+  let streak = 0;
+  classified.forEach((item) => {
+    if (item.kind === "no-current" || item.kind === "learning") {
+      streak = 0;
+      return;
+    }
+    if (item.elevated) streak += 1;
+    else streak = 0;
+    const findings = [];
+    if (item.jam) findings.push("jam");
+    if (item.elevated && streak >= OVERLOAD_STREAK) findings.push("overload");
+    if (item.dry) findings.push("dry");
+    item.findings = findings;
+    item.kind = findings[0] || (item.elevated ? "elevated" : "normal");
+  });
+
+  return { baseline, classified, drift: bearingDrift(ordered) };
+}
+
+function findingLabel(item) {
+  const names = {
+    dry: "Dry run / cavitation",
+    jam: "Jamming / blockage",
+    overload: "Motor overload",
+    elevated: "Above baseline",
+    normal: "Normal",
+    learning: "Baseline forming",
+    "no-current": "No current"
+  };
+  if (item.findings.length) return item.findings.map((finding) => names[finding]).join(", ");
+  return names[item.kind] || "—";
+}
+
+function findingTone(item) {
+  if (item.findings.includes("jam") || item.findings.includes("overload")) return "error";
+  if (item.findings.includes("dry") || item.kind === "elevated") return "warn";
+  if (item.kind === "normal") return "ok";
+  return "";
+}
+
+function setStatus(id, label, tone) {
+  const el = document.getElementById(id);
+  el.textContent = label;
+  el.className = tone ? `status ${tone}` : "status";
+}
+
+function latestPumpEvent() {
+  return [...state.pumpLatest, ...state.pumps]
+    .filter((run) => run.started_at)
+    .sort((a, b) => new Date(b.started_at) - new Date(a.started_at))[0] || null;
+}
+
+function pluralRuns(count) {
+  return `${formatCount(count)} run${count === 1 ? "" : "s"}`;
+}
+
+function renderHealth() {
+  const report = analyzePumpHealth(state.pumps);
+  const { baseline, classified, drift } = report;
+  const counts = { dry: 0, jam: 0, overload: 0, elevated: 0, current: 0 };
+  classified.forEach((item) => {
+    if (item.avg != null || item.max != null) counts.current += 1;
+    item.findings.forEach((finding) => {
+      counts[finding] += 1;
+    });
+    if (item.kind === "elevated") counts.elevated += 1;
+  });
+  const flagged = classified.filter((item) => item.findings.length);
+  const latest = latestPumpEvent();
+  const runtime = state.pumps.reduce((sum, run) => sum + Number(run.runtime_seconds || 0), 0);
+  const banner = document.getElementById("healthBanner");
+  const bannerTitle = document.getElementById("healthBannerTitle");
+  const bannerText = document.getElementById("healthBannerText");
+
+  if (latest && !latest.stopped_at) {
+    document.getElementById("healthNow").textContent = "Running";
+    document.getElementById("healthNowSub").textContent = `Since ${formatDateTime(latest.started_at)}`;
+  } else if (latest) {
+    document.getElementById("healthNow").textContent = "Idle";
+    document.getElementById("healthNowSub").textContent = `Last stop ${formatDateTime(latest.stopped_at || latest.started_at)}`;
+  } else {
+    document.getElementById("healthNow").textContent = "No runs";
+    document.getElementById("healthNowSub").textContent = "No pump cycles yet";
+  }
+
+  document.getElementById("healthRuntime").textContent = formatRuntime(runtime);
+  document.getElementById("healthRuntimeSub").textContent =
+    `${formatCount(state.pumps.length)} cycle${state.pumps.length === 1 ? "" : "s"} in this range`;
+
+  document.getElementById("healthBaseline").textContent = baseline.reliable ? formatAmps(baseline.amps) : "—";
+  document.getElementById("healthBaselineSub").textContent = baseline.samples
+    ? baseline.reliable
+      ? `Median of ${formatCount(baseline.samples)} runs`
+      : `${formatCount(baseline.samples)} of ${MIN_BASELINE_RUNS} runs needed`
+    : "No average current yet";
+
+  document.getElementById("healthFlags").textContent = formatCount(flagged.length);
+  document.getElementById("healthFlagsSub").textContent = drift.flagged
+    ? "Plus a rising weekly baseline"
+    : counts.current
+      ? "Dry run, jam, or overload"
+      : "Current not recorded yet";
+
+  const waiting = !state.pumps.length
+    ? "No pump cycles in this range."
+    : !counts.current
+      ? "Waiting for average and peak current on these runs."
+      : !baseline.reliable
+        ? `Need ${MIN_BASELINE_RUNS} runs with current before a run can be flagged. This range has ${formatCount(baseline.samples)}.`
+        : null;
+
+  setStatus("faultDry", waiting ? "Waiting" : counts.dry ? pluralRuns(counts.dry) : "Clear", waiting ? "warn" : counts.dry ? "warn" : "ok");
+  document.getElementById("faultDryDetail").textContent = waiting || counts.dry
+    ? waiting || `${pluralRuns(counts.dry)} averaged under ${Math.round(DRY_RATIO * 100)}% of the ${formatAmps(baseline.amps)} baseline. That fits a pump that has run out of water or drawn in air.`
+    : `No run averaged under ${Math.round(DRY_RATIO * 100)}% of the ${formatAmps(baseline.amps)} baseline.`;
+
+  setStatus("faultJam", waiting ? "Waiting" : counts.jam ? pluralRuns(counts.jam) : "Clear", waiting ? "warn" : counts.jam ? "error" : "ok");
+  document.getElementById("faultJamDetail").textContent = waiting || counts.jam
+    ? waiting || `${pluralRuns(counts.jam)} peaked above ${Math.round(JAM_RATIO * 100)}% of baseline. A blocked impeller or valve makes the motor work much harder and can overheat the windings.`
+    : `No peak jumped above ${Math.round(JAM_RATIO * 100)}% of the ${formatAmps(baseline.amps)} baseline.`;
+
+  if (!counts.current) {
+    setStatus("faultBearing", state.pumps.length ? "Waiting" : "Waiting", "warn");
+    document.getElementById("faultBearingDetail").textContent = state.pumps.length
+      ? "Waiting for average current. Bearing wear shows up as a gradual rise in the weekly median, so it needs several weeks."
+      : "No pump cycles in this range.";
+  } else if (drift.weeks.length < MIN_DRIFT_WEEKS) {
+    setStatus("faultBearing", "Need weeks", "warn");
+    document.getElementById("faultBearingDetail").textContent =
+      `A gradual rise needs at least ${MIN_DRIFT_WEEKS} separate weeks of current. This range has ${formatCount(drift.weeks.length)}.`;
+  } else if (drift.flagged) {
+    setStatus("faultBearing", "Drifting up", "warn");
+    document.getElementById("faultBearingDetail").textContent =
+      `The weekly median rose from ${formatAmps(drift.older)} to ${formatAmps(drift.newer)}. Extra mechanical friction, such as bearing wear, can cause that slow climb.`;
+  } else {
+    setStatus("faultBearing", "Clear", "ok");
+    document.getElementById("faultBearingDetail").textContent =
+      `Across ${formatCount(drift.weeks.length)} weeks, the later median (${formatAmps(drift.newer)}) has not risen ${Math.round((DRIFT_RATIO - 1) * 100)}% above the earlier one (${formatAmps(drift.older)}).`;
+  }
+
+  setStatus(
+    "faultOverload",
+    waiting ? "Waiting" : counts.overload ? pluralRuns(counts.overload) : "Clear",
+    waiting ? "warn" : counts.overload ? "error" : "ok"
+  );
+  document.getElementById("faultOverloadDetail").textContent = waiting || counts.overload
+    ? waiting || `${pluralRuns(counts.overload)} stayed above ${Math.round(OVERLOAD_RATIO * 100)}% of baseline for ${OVERLOAD_STREAK} or more cycles in a row. That continuous over-current sits outside the pump’s efficient range.`
+    : counts.elevated
+      ? `${pluralRuns(counts.elevated)} averaged above ${Math.round(OVERLOAD_RATIO * 100)}% of baseline, but not for ${OVERLOAD_STREAK} cycles in a row.`
+      : `No stretch of ${OVERLOAD_STREAK} runs stayed above ${Math.round(OVERLOAD_RATIO * 100)}% of baseline.`;
+
+  if (!state.pumps.length) {
+    banner.className = "health-banner warn";
+    bannerTitle.textContent = "No pump runs in this range";
+    bannerText.textContent = "Widen the dates to include cycles. Health checks use start, stop, average current, and peak current.";
+  } else if (!counts.current) {
+    banner.className = "health-banner warn";
+    bannerTitle.textContent = "No current readings yet";
+    bannerText.textContent = `${pluralRuns(state.pumps.length)} have start and stop times, and none include current. Dry-run, jam, bearing wear, and overload checks start when the monitor sends average and peak current.`;
+  } else if (!baseline.reliable) {
+    banner.className = "health-banner warn";
+    bannerTitle.textContent = "Baseline still forming";
+    bannerText.textContent = `${formatCount(baseline.samples)} of ${MIN_BASELINE_RUNS} runs with current are in this range. Nothing is flagged until the pump’s normal load is clear.`;
+  } else if (counts.jam || counts.overload) {
+    banner.className = "health-banner error";
+    bannerTitle.textContent = "Pump needs attention";
+    bannerText.textContent = healthSummary(counts, drift, baseline);
+  } else if (counts.dry || drift.flagged) {
+    banner.className = "health-banner warn";
+    bannerTitle.textContent = "Check the pump";
+    bannerText.textContent = healthSummary(counts, drift, baseline);
+  } else if (counts.elevated) {
+    banner.className = "health-banner warn";
+    bannerTitle.textContent = "Current sometimes high";
+    bannerText.textContent = `${pluralRuns(counts.elevated)} rose above the ${formatAmps(baseline.amps)} baseline, but not for long enough to call an overload.`;
+  } else {
+    banner.className = "health-banner ok";
+    bannerTitle.textContent = "Current looks normal";
+    bannerText.textContent = `No dry run, jam, overload, or bearing drift in this range. Normal load is ${formatAmps(baseline.amps)}.`;
+  }
+
+  renderHealthCharts(report);
+  renderHealthTable(classified);
+}
+
+function healthSummary(counts, drift, baseline) {
+  const parts = [];
+  if (counts.jam) {
+    parts.push(`${pluralRuns(counts.jam)} peaked hard enough to fit jamming or blockage`);
+  }
+  if (counts.overload) {
+    parts.push(`${pluralRuns(counts.overload)} carried sustained over-current`);
+  }
+  if (counts.dry) {
+    parts.push(`${pluralRuns(counts.dry)} ran well below the normal load`);
+  }
+  if (drift.flagged) {
+    parts.push(`the weekly baseline rose from ${formatAmps(drift.older)} to ${formatAmps(drift.newer)}`);
+  }
+  const joined = parts.join("; ");
+  const sentence = joined.charAt(0).toUpperCase() + joined.slice(1);
+  return `${sentence}. Normal load for these dates is ${formatAmps(baseline.amps)}.`;
+}
+
+function renderHealthCharts(report) {
+  const { baseline, classified, drift } = report;
+  const points = classified.filter((item) => item.avg != null || item.max != null);
+  document.getElementById("currentCaption").textContent = baseline.reliable
+    ? `Baseline ${formatAmps(baseline.amps)}`
+    : "Average and peak current";
+  document.getElementById("currentChart").parentElement.classList.toggle("short", points.length === 0);
+  document.getElementById("driftChart").parentElement.classList.toggle("short", drift.weeks.length === 0);
+
+  const datasets = [
+    {
+      label: "Average current",
+      data: points.map((item) => item.avg),
+      borderColor: FOOT_COLOR,
+      backgroundColor: FOOT_COLOR,
+      tension: 0.2,
+      spanGaps: false,
+      pointRadius: 3
+    },
+    {
+      label: "Peak current",
+      data: points.map((item) => item.max),
+      borderColor: PEAK_COLOR,
+      backgroundColor: PEAK_COLOR,
+      tension: 0.2,
+      spanGaps: false,
+      pointRadius: 3
+    }
+  ];
+
+  if (baseline.reliable) {
+    datasets.push({
+      label: "Baseline",
+      data: points.map(() => Number(baseline.amps.toFixed(2))),
+      borderColor: "#98a2b3",
+      backgroundColor: "#98a2b3",
+      borderDash: [4, 4],
+      pointRadius: 0,
+      tension: 0
+    });
+  }
+
+  mountChart("currentChart", "currentEmpty", points.length > 0, {
+    type: "line",
+    data: {
+      labels: points.map((item) => formatDateTime(item.run.started_at)),
+      datasets
+    },
+    options: {
+      ...chartBase(true),
+      scales: {
+        x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 6 } },
+        y: { beginAtZero: true, title: { display: true, text: "Amps" } }
+      }
+    }
+  });
+
+  const mid = Math.floor(drift.weeks.length / 2);
+  mountChart("driftChart", "driftEmpty", drift.weeks.length > 0, {
+    type: "bar",
+    data: {
+      labels: drift.weeks.map((week) => week.label),
+      datasets: [{
+        label: "Median amps",
+        data: drift.weeks.map((week) => Number(week.median.toFixed(2))),
+        backgroundColor: drift.weeks.map((_, index) =>
+          drift.flagged && index >= mid ? PEAK_COLOR : FOOT_COLOR
+        ),
+        borderRadius: 6,
+        maxBarThickness: 36
+      }]
+    },
+    options: {
+      ...chartBase(false),
+      scales: {
+        x: { grid: { display: false } },
+        y: { beginAtZero: true, title: { display: true, text: "Amps" } }
+      }
+    }
+  });
+}
+
+function renderHealthTable(classified) {
+  const body = document.getElementById("healthBody");
+  const caption = document.getElementById("healthRunsCaption");
+  const newest = [...classified].reverse();
+  const shown = newest.slice(0, 40);
+  caption.textContent = newest.length > shown.length
+    ? `Newest 40 of ${formatCount(newest.length)} cycles`
+    : "Each cycle in the selected dates, newest first";
+
+  if (!shown.length) {
+    body.innerHTML = `<tr><td colspan="5">No pump runs in this range.</td></tr>`;
+    return;
+  }
+
+  body.innerHTML = shown.map((item) => {
+    const tone = findingTone(item);
+    const runtime = item.run.stopped_at ? formatRuntime(item.run.runtime_seconds) : "In progress";
+    return `
+      <tr>
+        <td>${escapeHtml(formatDateTime(item.run.started_at))}</td>
+        <td>${escapeHtml(runtime)}</td>
+        <td>${escapeHtml(formatAmps(item.avg))}</td>
+        <td>${escapeHtml(formatAmps(item.max))}</td>
+        <td><span class="pill ${tone}">${escapeHtml(findingLabel(item))}</span></td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function applyViewChrome() {
+  const health = state.view === "health";
+  document.body.dataset.view = state.view;
+  document.querySelector("h1").textContent = health ? "Pump health dashboard" : "School usage dashboard";
+  document.querySelector(".sub").textContent = health
+    ? "Run time and current draw for this pump. Faults are judged against its own baseline. Times are India Standard Time."
+    : "Anonymous bathroom visits and estimated pump water. Times are India Standard Time.";
+  document.querySelector(".eyebrow").textContent = health ? "NPS HSR · Pump health" : "NPS HSR · Bathroom & water";
+  document.title = health ? "NPS HSR · Pump health" : "NPS HSR · Bathroom & Water";
+  document.getElementById("view-usage").hidden = health;
+  document.getElementById("view-health").hidden = !health;
+  document.getElementById("tab-usage").setAttribute("aria-selected", String(!health));
+  document.getElementById("tab-health").setAttribute("aria-selected", String(health));
+}
+
+function setView(view) {
+  state.view = view === "health" ? "health" : "usage";
+  const url = new URL(location.href);
+  url.hash = state.view === "health" ? "health" : "";
+  history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  applyViewChrome();
+  render();
+}
+
 function render() {
   syncBathroomOptions();
+  if (state.view === "health") {
+    destroyCharts(USAGE_CHART_IDS);
+    renderHealth();
+    return;
+  }
+  destroyCharts(HEALTH_CHART_IDS);
   renderCards();
   renderInsights();
   renderCharts();
@@ -874,7 +1322,7 @@ async function loadData() {
     order: "recorded_at.asc"
   });
   const pumpParams = new URLSearchParams({
-    select: "device_id,pump_id,started_at,stopped_at,runtime_seconds,wifi_rssi",
+    select: "device_id,pump_id,started_at,stopped_at,runtime_seconds,avg_current,max_current,wifi_rssi",
     order: "started_at.asc"
   });
 
@@ -893,7 +1341,7 @@ async function loadData() {
     limit: "300"
   });
   const latestPumpParams = new URLSearchParams({
-    select: "device_id,pump_id,started_at,wifi_rssi",
+    select: "device_id,pump_id,started_at,stopped_at,runtime_seconds,avg_current,max_current,wifi_rssi",
     order: "started_at.desc",
     limit: "100"
   });
@@ -969,12 +1417,24 @@ function bind() {
   });
 
   refreshBtn.addEventListener("click", loadData);
+
+  document.getElementById("tab-usage").addEventListener("click", () => setView("usage"));
+  document.getElementById("tab-health").addEventListener("click", () => setView("health"));
+  window.addEventListener("hashchange", () => {
+    const next = location.hash === "#health" ? "health" : "usage";
+    if (next === state.view) return;
+    state.view = next;
+    applyViewChrome();
+    render();
+  });
 }
 
 function init() {
   const today = istTodayKey();
   fromInput.value = addDays(today, -29);
   toInput.value = today;
+  state.view = location.hash === "#health" ? "health" : "usage";
+  applyViewChrome();
   if (window.Chart) {
     Chart.defaults.font.family = getComputedStyle(document.documentElement).fontFamily;
     Chart.defaults.color = "#667085";

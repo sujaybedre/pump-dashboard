@@ -31,13 +31,13 @@
           <button type="button" data-preset="month">This month</button>
           <button type="button" data-preset="all">All</button>
         </div>
-        <label>
+        <label class="usage-only">
           Bathroom
           <select id="bathroomFilter">
             <option value="">All bathrooms</option>
           </select>
         </label>
-        <label>
+        <label class="usage-only">
           Pump flow
           <span class="inline">
             <input id="flowRate" type="number" min="0.1" step="0.1" value="30" />
@@ -45,15 +45,22 @@
           </span>
         </label>
         <button id="refreshBtn" type="button">Refresh</button>
+        <span id="syncStatus" class="status">Loading…</span>
       </div>
     </header>
 
+    <div class="tabs" role="tablist" aria-label="Dashboard">
+      <button type="button" id="tab-usage" role="tab" aria-selected="true" aria-controls="view-usage">School usage</button>
+      <button type="button" id="tab-health" role="tab" aria-selected="false" aria-controls="view-health">Pump health</button>
+    </div>
+
+    <p id="loadError" class="banner" hidden></p>
+
+    <div id="view-usage" class="view" role="tabpanel" aria-labelledby="tab-usage">
     <section class="notice">
       Visit totals add each upload’s count. Water is <strong>pump runtime × the flow rate</strong>.
       Calibrate L/min from a real flow or tank measurement. Counts do not identify anyone.
     </section>
-
-    <p id="loadError" class="banner" hidden></p>
 
     <section class="cards">
       <article class="card">
@@ -146,7 +153,6 @@
             <h2>Devices</h2>
             <p>Latest upload, independent of the date filter</p>
           </div>
-          <span id="syncStatus" class="status">Loading…</span>
         </div>
         <div id="devicesBody" class="device-list">
           <p class="muted">Loading…</p>
@@ -236,9 +242,135 @@
         </table>
       </div>
     </section>
+    </div>
+
+    <div id="view-health" class="view" role="tabpanel" aria-labelledby="tab-health" hidden>
+      <section id="healthBanner" class="health-banner">
+        <strong id="healthBannerTitle">Checking pump current</strong>
+        <p id="healthBannerText">Loading pump runs.</p>
+      </section>
+
+      <section class="cards four">
+        <article class="card">
+          <span>Pump now</span>
+          <strong id="healthNow">—</strong>
+          <small id="healthNowSub">latest cycle</small>
+        </article>
+        <article class="card">
+          <span>Runtime in range</span>
+          <strong id="healthRuntime">—</strong>
+          <small id="healthRuntimeSub">completed cycles</small>
+        </article>
+        <article class="card">
+          <span>Normal current</span>
+          <strong id="healthBaseline">—</strong>
+          <small id="healthBaselineSub">baseline from this pump</small>
+        </article>
+        <article class="card">
+          <span>Flagged runs</span>
+          <strong id="healthFlags">—</strong>
+          <small id="healthFlagsSub">in selected dates</small>
+        </article>
+      </section>
+
+      <section class="fault-grid">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Dry running and cavitation</h2>
+              <p>Load drops when the pump loses water or pulls in air.</p>
+            </div>
+            <span id="faultDry" class="status">—</span>
+          </div>
+          <p id="faultDryDetail" class="fault-detail"></p>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Jamming or blockage</h2>
+              <p>The motor works much harder if the impeller or a valve is blocked.</p>
+            </div>
+            <span id="faultJam" class="status">—</span>
+          </div>
+          <p id="faultJamDetail" class="fault-detail"></p>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Bearing wear</h2>
+              <p>Worn bearings add friction and slowly raise the current needed to run.</p>
+            </div>
+            <span id="faultBearing" class="status">—</span>
+          </div>
+          <p id="faultBearingDetail" class="fault-detail"></p>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Motor overload</h2>
+              <p>Sustained over-current runs the pump outside its efficient range.</p>
+            </div>
+            <span id="faultOverload" class="status">—</span>
+          </div>
+          <p id="faultOverloadDetail" class="fault-detail"></p>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="panel chart-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Current each run</h2>
+              <p id="currentCaption">Average and peak against the baseline</p>
+            </div>
+          </div>
+          <div class="chart-container">
+            <canvas id="currentChart"></canvas>
+            <p class="chart-empty" id="currentEmpty" hidden>No current readings in this range.</p>
+          </div>
+        </article>
+        <article class="panel chart-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Weekly baseline</h2>
+              <p>Median average current, for slow bearing wear</p>
+            </div>
+          </div>
+          <div class="chart-container">
+            <canvas id="driftChart"></canvas>
+            <p class="chart-empty" id="driftEmpty" hidden>No weekly current yet.</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Pump runs</h2>
+            <p id="healthRunsCaption">Each cycle in the selected dates, newest first</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Started</th>
+                <th>Runtime</th>
+                <th>Average</th>
+                <th>Peak</th>
+                <th>Finding</th>
+              </tr>
+            </thead>
+            <tbody id="healthBody">
+              <tr><td colspan="5">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
 
     <footer>
-      Counters run on battery, keep Wi-Fi off between uploads, and sleep outside school hours (7:30–16:00 IST).
+      Times are India Standard Time. Bathroom counters sleep outside 7:30–16:00. Pump faults are judged from current draw.
     </footer>
   </main>
 
