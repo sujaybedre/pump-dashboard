@@ -1009,6 +1009,292 @@ function pluralRuns(count) {
   return `${formatCount(count)} run${count === 1 ? "" : "s"}`;
 }
 
+const pumpScene = {
+  raf: 0,
+  active: false,
+  replay: true,
+  reduced: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  model: null,
+  readKey: ""
+};
+
+function roundRect(ctx, x, y, w, h, r) {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
+
+function formatVolume(value) {
+  if (value == null || !Number.isFinite(value)) return "—";
+  if (value >= 1000) return formatLitres(value);
+  if (value >= 100) return `${Math.round(value).toLocaleString("en-IN")} L`;
+  return `${value.toFixed(1)} L`;
+}
+
+function sceneMotion(model, time) {
+  if (!model) return { litres: 0, seconds: 0, moving: false };
+  if (model.live && model.startedAt) {
+    const seconds = Math.max(0, (Date.now() - new Date(model.startedAt).getTime()) / 1000);
+    return { litres: litresFor(seconds), seconds, moving: true };
+  }
+  if (model.hasRun && pumpScene.replay && !pumpScene.reduced) {
+    const t = (time % 6800) / 6800;
+    return {
+      litres: model.cycleLitres * t,
+      seconds: model.cycleSeconds * t,
+      moving: true
+    };
+  }
+  return { litres: model.cycleLitres || 0, seconds: model.cycleSeconds || 0, moving: false };
+}
+
+function tankLevel(litres) {
+  if (!litres || litres <= 0) return 0.08;
+  return Math.min(0.9, 0.12 + 0.78 * (1 - Math.exp(-litres / 70)));
+}
+
+function pointAlong(points, t) {
+  const lengths = [];
+  let total = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    const length = Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+    lengths.push(length);
+    total += length;
+  }
+  let dist = Math.min(Math.max(t, 0), 1) * total;
+  for (let i = 0; i < lengths.length; i += 1) {
+    if (dist <= lengths[i] || i === lengths.length - 1) {
+      const u = lengths[i] ? dist / lengths[i] : 0;
+      return {
+        x: points[i].x + (points[i + 1].x - points[i].x) * u,
+        y: points[i].y + (points[i + 1].y - points[i].y) * u
+      };
+    }
+    dist -= lengths[i];
+  }
+  return points[points.length - 1];
+}
+
+function drawWater(ctx, tank, level, time, bubbly) {
+  const fillTop = tank.y + tank.h * (1 - level);
+  ctx.save();
+  roundRect(ctx, tank.x, tank.y, tank.w, tank.h, 12);
+  ctx.clip();
+  ctx.fillStyle = "#2f6fed";
+  ctx.fillRect(tank.x, fillTop, tank.w, tank.y + tank.h - fillTop);
+  ctx.beginPath();
+  ctx.moveTo(tank.x, fillTop);
+  for (let x = 0; x <= tank.w; x += 6) {
+    ctx.lineTo(tank.x + x, fillTop + Math.sin(x / 14 + time / 280) * 2.4);
+  }
+  ctx.lineTo(tank.x + tank.w, fillTop + 7);
+  ctx.lineTo(tank.x, fillTop + 7);
+  ctx.fillStyle = "rgba(255,255,255,.35)";
+  ctx.fill();
+  if (bubbly) {
+    ctx.fillStyle = "rgba(255,255,255,.75)";
+    for (let i = 0; i < 5; i += 1) {
+      const y = fillTop + 16 + ((time / 18 + i * 23) % (tank.h * level - 10));
+      ctx.beginPath();
+      ctx.arc(tank.x + 18 + (i % 3) * 22, y, 2.5 + (i % 2), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+  ctx.strokeStyle = "#d5deea";
+  ctx.lineWidth = 2;
+  roundRect(ctx, tank.x, tank.y, tank.w, tank.h, 12);
+  ctx.stroke();
+}
+
+function drawPumpFrame(time) {
+  const canvas = document.getElementById("pumpCanvas");
+  const model = pumpScene.model;
+  if (!canvas || !model) return;
+  const bounds = canvas.parentElement.getBoundingClientRect();
+  if (bounds.width < 20) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const width = bounds.width;
+  const height = bounds.height;
+  const pixelW = Math.round(width * dpr);
+  const pixelH = Math.round(height * dpr);
+  if (canvas.width !== pixelW || canvas.height !== pixelH) {
+    canvas.width = pixelW;
+    canvas.height = pixelH;
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const motion = sceneMotion(model, time || 0);
+  const sourceW = Math.min(150, width * 0.18);
+  const deliveryW = Math.min(168, width * 0.2);
+  const source = { x: 24, y: height * 0.34, w: sourceW, h: height * 0.48 };
+  const delivery = { x: width - 24 - deliveryW, y: 28, w: deliveryW, h: height * 0.42 };
+  const pump = { x: width * 0.42, y: height * 0.64, r: Math.min(50, height * 0.18) };
+  const headerY = delivery.y + delivery.h * 0.42;
+  const path = [
+    { x: source.x + source.w, y: source.y + source.h * 0.4 },
+    { x: pump.x - pump.r, y: pump.y },
+    { x: pump.x - 6, y: pump.y },
+    { x: pump.x + 6, y: pump.y - pump.r },
+    { x: pump.x + 6, y: headerY },
+    { x: delivery.x, y: headerY }
+  ];
+
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#f4f7fb";
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  path.forEach((point, index) => (index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y)));
+  ctx.strokeStyle = "#7f8da3";
+  ctx.lineWidth = 16;
+  ctx.stroke();
+  ctx.strokeStyle = "#e7eef8";
+  ctx.lineWidth = 8;
+  ctx.stroke();
+
+  const sourceLevel = motion.moving ? 0.62 + Math.sin(time / 500) * 0.03 : 0.66;
+  drawWater(ctx, source, sourceLevel, time || 0, model.fault === "dry" && motion.moving);
+  drawWater(ctx, delivery, tankLevel(motion.litres), time || 0, false);
+
+  const housing = model.fault === "jam" ? "#a73333" : model.fault === "overload" ? "#b45309" : "#172033";
+  ctx.beginPath();
+  ctx.arc(pump.x, pump.y, pump.r, 0, Math.PI * 2);
+  ctx.fillStyle = "#eef3f8";
+  ctx.fill();
+  ctx.lineWidth = 8;
+  ctx.strokeStyle = housing;
+  ctx.stroke();
+
+  const spin = motion.moving ? (model.fault === "jam" ? 0.004 : 0.012) * (time || 0) : 0.4;
+  ctx.save();
+  ctx.translate(pump.x, pump.y);
+  ctx.rotate(spin);
+  ctx.fillStyle = "#2f6fed";
+  for (let vane = 0; vane < 6; vane += 1) {
+    ctx.rotate(Math.PI / 3);
+    roundRect(ctx, 8, -5, pump.r - 18, 10, 4);
+    ctx.fill();
+  }
+  ctx.beginPath();
+  ctx.arc(0, 0, 9, 0, Math.PI * 2);
+  ctx.fillStyle = "#172033";
+  ctx.fill();
+  ctx.restore();
+
+  const motorX = pump.x - 48;
+  const motorY = pump.y + pump.r + 10;
+  roundRect(ctx, motorX, motorY, 96, 34, 8);
+  ctx.fillStyle = "#243044";
+  ctx.fill();
+  ctx.fillStyle = motion.moving && model.live ? "#3dd68c" : motion.moving ? "#f5c16c" : "#98a2b3";
+  ctx.beginPath();
+  ctx.arc(motorX + 16, motorY + 17, 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (motion.moving) {
+    for (let i = 0; i < 14; i += 1) {
+      const point = pointAlong(path, ((time / 1400) + i / 14) % 1);
+      if (Math.hypot(point.x - pump.x, point.y - pump.y) < pump.r - 2) continue;
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
+      ctx.fillStyle = "#2f6fed";
+      ctx.fill();
+    }
+  }
+
+  ctx.fillStyle = "#172033";
+  ctx.font = "700 13px Inter, ui-sans-serif, system-ui, sans-serif";
+  ctx.fillText("Suction", source.x, source.y + source.h + 18);
+  ctx.fillText("Delivery", delivery.x, delivery.y + delivery.h + 18);
+  const volume = formatVolume(motion.litres);
+  const levelTop = delivery.y + delivery.h * (1 - tankLevel(motion.litres));
+  ctx.fillStyle = levelTop < delivery.y + 36 ? "#ffffff" : "#172033";
+  ctx.font = "800 18px Inter, ui-sans-serif, system-ui, sans-serif";
+  ctx.fillText(volume, delivery.x + 12, delivery.y + 26);
+  ctx.fillStyle = motion.moving && model.live ? "#247445" : "#8a5a10";
+  ctx.font = "800 12px Inter, ui-sans-serif, system-ui, sans-serif";
+  const badge = model.live ? "RUNNING" : motion.moving ? "REPLAY" : model.hasRun ? "IDLE" : "NO RUNS";
+  ctx.fillText(badge, 24, 28);
+
+  const readKey = [
+    model.flow,
+    formatVolume(motion.litres),
+    formatLitres(model.rangeLitres),
+    formatRuntime(motion.seconds),
+    model.current == null ? "—" : formatAmps(model.current)
+  ].join("|");
+  if (readKey !== pumpScene.readKey) {
+    pumpScene.readKey = readKey;
+    document.getElementById("sceneFlow").textContent = `${model.flow} L/min`;
+    document.getElementById("sceneVolume").textContent = formatVolume(motion.litres);
+    document.getElementById("sceneRange").textContent = formatLitres(model.rangeLitres || 0);
+    document.getElementById("sceneRuntime").textContent = formatRuntime(motion.seconds);
+    document.getElementById("sceneCurrent").textContent = model.current == null
+      ? "Not recorded"
+      : `${formatAmps(model.current)} avg`;
+    canvas.setAttribute("aria-label", `${badge}. ${volume} this cycle at ${model.flow} litres per minute.`);
+  }
+}
+
+function ensurePumpLoop() {
+  if (pumpScene.reduced) {
+    drawPumpFrame(0);
+    return;
+  }
+  if (pumpScene.active) return;
+  pumpScene.active = true;
+  const tick = (time) => {
+    if (!pumpScene.active) return;
+    drawPumpFrame(time);
+    pumpScene.raf = requestAnimationFrame(tick);
+  };
+  pumpScene.raf = requestAnimationFrame(tick);
+}
+
+function stopPumpLoop() {
+  pumpScene.active = false;
+  if (pumpScene.raf) cancelAnimationFrame(pumpScene.raf);
+  pumpScene.raf = 0;
+}
+
+function updatePumpScene(latest, rangeSeconds, classified) {
+  const live = Boolean(latest && !latest.stopped_at);
+  const cycleSeconds = latest ? Number(latest.runtime_seconds || 0) : 0;
+  const match = latest && classified.find((item) =>
+    item.run.started_at === latest.started_at && item.run.device_id === latest.device_id
+  );
+  pumpScene.model = {
+    live,
+    hasRun: Boolean(latest),
+    startedAt: latest?.started_at || null,
+    flow: flowLpm(),
+    rangeLitres: litresFor(rangeSeconds),
+    cycleSeconds,
+    cycleLitres: litresFor(cycleSeconds),
+    current: latest ? reading(latest.avg_current) : null,
+    fault: match && ["dry", "jam", "overload"].includes(match.kind) ? match.kind : "normal"
+  };
+  const button = document.getElementById("pumpReplayBtn");
+  const caption = document.getElementById("pumpSceneCaption");
+  button.hidden = live || !latest || pumpScene.reduced;
+  button.textContent = pumpScene.replay ? "Pause replay" : "Play replay";
+  if (live) caption.textContent = "Live cycle. Volume is flow rate times time since the pump started.";
+  else if (!latest) caption.textContent = "No cycle recorded yet.";
+  else if (!pumpScene.replay || pumpScene.reduced) caption.textContent = "Pump is idle. Last cycle held.";
+  else caption.textContent = "Pump is idle. Replaying the last cycle.";
+  pumpScene.readKey = "";
+  if (state.view === "health") ensurePumpLoop();
+  else stopPumpLoop();
+}
+
 function renderHealth() {
   const report = analyzePumpHealth(state.pumps);
   const { baseline, classified, drift } = report;
@@ -1136,6 +1422,7 @@ function renderHealth() {
 
   renderHealthCharts(report);
   renderHealthTable(classified);
+  updatePumpScene(latest, runtime, classified);
 }
 
 function healthSummary(counts, drift, baseline) {
@@ -1300,6 +1587,7 @@ function render() {
     return;
   }
   destroyCharts(HEALTH_CHART_IDS);
+  stopPumpLoop();
   renderCards();
   renderInsights();
   renderCharts();
@@ -1417,6 +1705,15 @@ function bind() {
   });
 
   refreshBtn.addEventListener("click", loadData);
+
+  document.getElementById("pumpReplayBtn").addEventListener("click", () => {
+    pumpScene.replay = !pumpScene.replay;
+    pumpScene.readKey = "";
+    document.getElementById("pumpReplayBtn").textContent = pumpScene.replay ? "Pause replay" : "Play replay";
+    document.getElementById("pumpSceneCaption").textContent = pumpScene.replay
+      ? "Pump is idle. Replaying the last cycle."
+      : "Pump is idle. Last cycle held.";
+  });
 
   document.getElementById("tab-usage").addEventListener("click", () => setView("usage"));
   document.getElementById("tab-health").addEventListener("click", () => setView("health"));

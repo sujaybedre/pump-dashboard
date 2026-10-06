@@ -37,7 +37,7 @@
             <option value="">All bathrooms</option>
           </select>
         </label>
-        <label class="usage-only">
+        <label>
           Pump flow
           <span class="inline">
             <input id="flowRate" type="number" min="0.1" step="0.1" value="30" />
@@ -248,6 +248,26 @@
       <section id="healthBanner" class="health-banner">
         <strong id="healthBannerTitle">Checking pump current</strong>
         <p id="healthBannerText">Loading pump runs.</p>
+      </section>
+
+      <section class="panel pump-scene">
+        <div class="panel-head">
+          <div>
+            <h2>Pump</h2>
+            <p id="pumpSceneCaption">Suction, impeller, and delivery</p>
+          </div>
+          <button type="button" id="pumpReplayBtn" hidden>Pause replay</button>
+        </div>
+        <div class="pump-canvas-wrap">
+          <canvas id="pumpCanvas" aria-label="Animated pump moving water from suction to delivery"></canvas>
+        </div>
+        <dl class="pump-facts">
+          <div><dt>Flow</dt><dd id="sceneFlow">—</dd></div>
+          <div><dt>This cycle</dt><dd id="sceneVolume">—</dd></div>
+          <div><dt>In selected dates</dt><dd id="sceneRange">—</dd></div>
+          <div><dt>Cycle runtime</dt><dd id="sceneRuntime">—</dd></div>
+          <div><dt>Current</dt><dd id="sceneCurrent">—</dd></div>
+        </dl>
       </section>
 
       <section class="cards four">
