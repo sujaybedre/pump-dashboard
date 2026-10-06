@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pump Water Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">NPS HSR · Pump Monitoring</p>
+        <h1>Water Consumption Dashboard</h1>
+        <p class="sub">Estimated water use from motor runtime recorded by the ESP32.</p>
+      </div>
+
+      <div class="controls">
+        <label>
+          Pump flow
+          <span class="inline">
+            <input id="flowRate" type="number" min="0.1" step="0.1" value="30" />
+            <span>L/min</span>
+          </span>
+        </label>
+        <button id="refreshBtn" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <section class="notice">
+      Water consumption is estimated as <strong>runtime × configured pump flow rate</strong>.
+      Calibrate the L/min value using a real flow or tank-fill measurement for better accuracy.
+    </section>
+
+    <section class="cards">
+      <article class="card">
+        <span>Estimated water today</span>
+        <strong id="todayWater">—</strong>
+        <small>litres</small>
+      </article>
+
+      <article class="card">
+        <span>Pump runtime today</span>
+        <strong id="todayRuntime">—</strong>
+        <small>hours / minutes</small>
+      </article>
+
+      <article class="card">
+        <span>Runs today</span>
+        <strong id="todayRuns">—</strong>
+        <small>completed cycles</small>
+      </article>
+
+      <article class="card">
+        <span>Last run</span>
+        <strong id="lastRun">—</strong>
+        <small id="lastRunTime">—</small>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="panel chart-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Estimated water consumption</h2>
+            <p>Last 7 days</p>
+          </div>
+        </div>
+
+        <div class="chart-container">
+          <canvas id="waterChart"></canvas>
+        </div>
+      </article>
+
+      <article class="panel chart-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Pump runtime</h2>
+            <p>Last 7 days</p>
+          </div>
+        </div>
+
+        <div class="chart-container">
+          <canvas id="runtimeChart"></canvas>
+        </div>
+      </article>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Recent pump runs</h2>
+          <p>Latest completed events from Supabase</p>
+        </div>
+        <span id="syncStatus" class="status">Loading…</span>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Started</th>
+              <th>Stopped</th>
+              <th>Runtime</th>
+              <th>Estimated water</th>
+              <th>Signal</th>
+            </tr>
+          </thead>
+          <tbody id="eventsBody">
+            <tr><td colspan="5">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>
+      Device: <strong>npshsr_01</strong> · Pump: <strong>pump_01</strong>
+    </footer>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
