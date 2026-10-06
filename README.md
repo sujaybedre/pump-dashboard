@@ -1,37 +1,30 @@
-# Pump Water Dashboard - Fixed
+# NPS HSR bathroom and water dashboard
 
-Static HTML/CSS/JavaScript dashboard for the ESP32 + Supabase pump monitor.
+Static dashboard for school administrators. It reads two Supabase tables and does not collect personal data.
 
-## Fixes in this version
-- Chart containers have fixed heights.
-- Chart.js canvases can no longer grow indefinitely.
-- Charts are destroyed before being recreated.
-- Chart animation is disabled to avoid repeated resize work.
-- Added resizeDelay.
-- Added axis labels for litres and minutes.
-- Dashboard remains responsive on mobile.
+- `bathroom_people_count` — anonymous visit batches from ESP32 + VL53L0X counters (`count_increment`, `cumulative_count`, `recorded_at`, `wifi_rssi`)
+- `pump_events` — pump start, stop, and runtime
 
-## Deploy
-Upload this folder to Vercel as a static site.
+Visit totals use `count_increment`. The on-device counter can reset, so it is shown only as a device reading.
 
-Files:
-- index.html
-- style.css
-- app.js
-- README.md
-
-## Water estimate
-The dashboard estimates:
+Water is estimated as:
 
     litres = runtime_seconds / 60 × flow_litres_per_minute
 
-The default is 30 L/min. Change this in the dashboard after calibrating the actual pump flow.
+The default flow is 30 L/min. Change it on the dashboard after a real calibration. The browser stores that value locally.
+
+Times are shown in India Standard Time. Counters are expected to report during school hours, 7:30–16:00 IST.
+
+## Deploy
+
+Upload this folder to Vercel as a static site.
+
+- `index.html`
+- `style.css`
+- `app.js`
 
 ## Security
+
 The browser contains only the Supabase publishable key.
 
-For production:
-- enable Supabase Row Level Security
-- allow only the required SELECT access for this dashboard
-- never use a secret/service-role key in app.js
-# pump-dashboard
+For production, enable Row Level Security and allow only the SELECT access this dashboard needs. Never put a secret or service-role key in `app.js`.

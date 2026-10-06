@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Pump Water Dashboard</title>
+  <title>NPS HSR · Bathroom &amp; Water</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
@@ -11,12 +11,32 @@
   <main class="shell">
     <header class="topbar">
       <div>
-        <p class="eyebrow">NPS HSR · Pump Monitoring</p>
-        <h1>Water Consumption Dashboard</h1>
-        <p class="sub">Estimated water use from motor runtime recorded by the ESP32.</p>
+        <p class="eyebrow">NPS HSR · Bathroom &amp; water</p>
+        <h1>School usage dashboard</h1>
+        <p class="sub">Anonymous bathroom visits and estimated pump water. Times are India Standard Time.</p>
       </div>
 
       <div class="controls">
+        <label>
+          From
+          <input id="fromDate" type="date" />
+        </label>
+        <label>
+          To
+          <input id="toDate" type="date" />
+        </label>
+        <div class="segment" role="group" aria-label="Date presets">
+          <button type="button" data-preset="7">7 days</button>
+          <button type="button" data-preset="30" class="active">30 days</button>
+          <button type="button" data-preset="month">This month</button>
+          <button type="button" data-preset="all">All</button>
+        </div>
+        <label>
+          Bathroom
+          <select id="bathroomFilter">
+            <option value="">All bathrooms</option>
+          </select>
+        </label>
         <label>
           Pump flow
           <span class="inline">
@@ -29,33 +49,80 @@
     </header>
 
     <section class="notice">
-      Water consumption is estimated as <strong>runtime × configured pump flow rate</strong>.
-      Calibrate the L/min value using a real flow or tank-fill measurement for better accuracy.
+      Visit totals add each upload’s count. Water is <strong>pump runtime × the flow rate</strong>.
+      Calibrate L/min from a real flow or tank measurement. Counts do not identify anyone.
     </section>
+
+    <p id="loadError" class="banner" hidden></p>
 
     <section class="cards">
       <article class="card">
-        <span>Estimated water today</span>
-        <strong id="todayWater">—</strong>
-        <small>litres</small>
+        <span>Bathroom visits</span>
+        <strong id="kpiFootfall">—</strong>
+        <small id="kpiFootfallSub">in selected dates</small>
+      </article>
+      <article class="card">
+        <span>Peak hour</span>
+        <strong id="kpiPeak">—</strong>
+        <small id="kpiPeakSub">IST</small>
+      </article>
+      <article class="card">
+        <span>Estimated water</span>
+        <strong id="kpiWater">—</strong>
+        <small id="kpiWaterSub">from pump runtime</small>
+      </article>
+      <article class="card">
+        <span>Water per visit</span>
+        <strong id="kpiPerPerson">—</strong>
+        <small id="kpiPerPersonSub">days with both signals</small>
+      </article>
+      <article class="card">
+        <span>Pump runtime</span>
+        <strong id="kpiRuntime">—</strong>
+        <small id="kpiRuntimeSub">completed cycles</small>
+      </article>
+      <article class="card">
+        <span>Last bathroom data</span>
+        <strong id="kpiLastSeen">—</strong>
+        <small id="kpiLastSeenSub">device contact</small>
+      </article>
+    </section>
+
+    <section class="panel insight-panel">
+      <div class="panel-head">
+        <div>
+          <h2>What stands out</h2>
+          <p>Patterns in the selected dates</p>
+        </div>
+      </div>
+      <ul id="insights" class="insights"></ul>
+    </section>
+
+    <section class="grid">
+      <article class="panel chart-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Visits by day</h2>
+            <p id="visitsDayCaption">Daily footfall</p>
+          </div>
+        </div>
+        <div class="chart-container">
+          <canvas id="visitsDayChart"></canvas>
+          <p class="chart-empty" id="visitsDayEmpty" hidden>No visits in this range.</p>
+        </div>
       </article>
 
-      <article class="card">
-        <span>Pump runtime today</span>
-        <strong id="todayRuntime">—</strong>
-        <small>hours / minutes</small>
-      </article>
-
-      <article class="card">
-        <span>Runs today</span>
-        <strong id="todayRuns">—</strong>
-        <small>completed cycles</small>
-      </article>
-
-      <article class="card">
-        <span>Last run</span>
-        <strong id="lastRun">—</strong>
-        <small id="lastRunTime">—</small>
+      <article class="panel chart-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Visits by hour</h2>
+            <p>School hours in blue, IST</p>
+          </div>
+        </div>
+        <div class="chart-container">
+          <canvas id="visitsHourChart"></canvas>
+          <p class="chart-empty" id="visitsHourEmpty" hidden>No visits in this range.</p>
+        </div>
       </article>
     </section>
 
@@ -63,26 +130,59 @@
       <article class="panel chart-panel">
         <div class="panel-head">
           <div>
-            <h2>Estimated water consumption</h2>
-            <p>Last 7 days</p>
+            <h2>Bathroom comparison</h2>
+            <p id="bathroomCaption">Share of visits</p>
           </div>
         </div>
+        <div class="chart-container">
+          <canvas id="bathroomChart"></canvas>
+          <p class="chart-empty" id="bathroomEmpty" hidden>No bathroom devices in this range.</p>
+        </div>
+      </article>
 
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Devices</h2>
+            <p>Latest upload, independent of the date filter</p>
+          </div>
+          <span id="syncStatus" class="status">Loading…</span>
+        </div>
+        <div id="devicesBody" class="device-list">
+          <p class="muted">Loading…</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="panel chart-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Water use</h2>
+            <p id="waterCaption">Estimated litres</p>
+          </div>
+          <div class="segment" role="group" aria-label="Water trend grouping">
+            <button type="button" data-grain="day" class="active">Day</button>
+            <button type="button" data-grain="week">Week</button>
+            <button type="button" data-grain="month">Month</button>
+          </div>
+        </div>
         <div class="chart-container">
           <canvas id="waterChart"></canvas>
+          <p class="chart-empty" id="waterEmpty" hidden>No pump runtime in this range.</p>
         </div>
       </article>
 
       <article class="panel chart-panel">
         <div class="panel-head">
           <div>
-            <h2>Pump runtime</h2>
-            <p>Last 7 days</p>
+            <h2>Visits and water</h2>
+            <p>All bathrooms against school pump water</p>
           </div>
         </div>
-
         <div class="chart-container">
-          <canvas id="runtimeChart"></canvas>
+          <canvas id="relationChart"></canvas>
+          <p class="chart-empty" id="relationEmpty" hidden>No visits or pump runtime in this range.</p>
         </div>
       </article>
     </section>
@@ -90,12 +190,35 @@
     <section class="panel">
       <div class="panel-head">
         <div>
-          <h2>Recent pump runs</h2>
-          <p>Latest completed events from Supabase</p>
+          <h2>Recent visit uploads</h2>
+          <p>Latest batches from the people counters</p>
         </div>
-        <span id="syncStatus" class="status">Loading…</span>
       </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Recorded</th>
+              <th>Bathroom</th>
+              <th>Visits</th>
+              <th>Device counter</th>
+              <th>Signal</th>
+            </tr>
+          </thead>
+          <tbody id="bathroomBody">
+            <tr><td colspan="5">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
 
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Recent pump runs</h2>
+          <p>Completed cycles and estimated water</p>
+        </div>
+      </div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -115,7 +238,7 @@
     </section>
 
     <footer>
-      Device: <strong>npshsr_01</strong> · Pump: <strong>pump_01</strong>
+      Counters run on battery, keep Wi-Fi off between uploads, and sleep outside school hours (7:30–16:00 IST).
     </footer>
   </main>
 
